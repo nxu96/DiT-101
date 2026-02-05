@@ -1,0 +1,8 @@
+mnist/
+.vscode/
+.cursor/
+__pycache__/
+CLAUDE.md
+refs/
+.ipynb_checkpoints/
+model.pth
