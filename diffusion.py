@@ -19,9 +19,7 @@ Reference: "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
 """
 
 import torch
-
 from config import T  # Total number of diffusion timesteps (e.g., 1000)
-
 
 # ==============================================================================
 # DIFFUSION SCHEDULE PARAMETERS
@@ -55,7 +53,9 @@ alphas_cumprod_prev = torch.cat(
 # Posterior variance: used in the reverse (denoising) process
 # This is the variance of q(x_{t-1} | x_t, x_0)
 # Formula: σ²_t = β_t * (1 - α̅_{t-1}) / (1 - α̅_t)
-variance = (1 - alphas) * (1 - alphas_cumprod_prev) / (1 - alphas_cumprod)  # Shape: (T,)
+variance = (
+    (1 - alphas) * (1 - alphas_cumprod_prev) / (1 - alphas_cumprod)
+)  # Shape: (T,)
 
 
 # ==============================================================================
@@ -90,6 +90,8 @@ def forward_add_noise(x, t):
     """
     # Sample random Gaussian noise with same shape as input
     noise = torch.randn_like(x)  # Shape: (batch, channel, height, width)
+    # NOTE: The values of noise are iid. So the noise of every pixel in
+    # every image is independently sampled from a standard normal distribution.
 
     # Get α̅_t for each image's timestep and reshape for broadcasting
     # alphas_cumprod[t] extracts the values for each batch item
@@ -104,6 +106,8 @@ def forward_add_noise(x, t):
     #
     # At t=0: α̅_t ≈ 1, so x_t ≈ x_0 (almost no noise)
     # At t=T-1: α̅_t ≈ 0, so x_t ≈ ε (almost pure noise)
+    # NOTE: x_noisy is actually a linear combo of the original image and the noise.
+    # It is not a simple addition of the two.
     x_noisy = (
         torch.sqrt(batch_alphas_cumprod) * x
         + torch.sqrt(1 - batch_alphas_cumprod) * noise
@@ -118,7 +122,6 @@ def forward_add_noise(x, t):
 
 if __name__ == "__main__":
     import matplotlib.pyplot as plt
-
     from dataset import MNIST
 
     # Load MNIST dataset
