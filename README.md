@@ -71,6 +71,12 @@ Each row shows one digit class (0-9) progressively generated from random noise (
 
 ![Flow Matching Results](inference_fm.png)
 
+### Flow Matching — Step Count Comparison
+
+Same initial noise sampled with 1, 2, 5, 10, 50, 100, 200, and 1000 Euler steps. Each row is a digit class (0-9), each column is a step count:
+
+![Flow Matching Step Count Comparison](inference_fm_steps.png)
+
 ## Getting Started
 
 ### Requirements

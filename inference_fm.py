@@ -109,7 +109,7 @@ print("Flow matching model loaded successfully")
 
 
 # ==============================================================================
-# GENERATE IMAGES
+# GENERATE IMAGES — DENOISING PROGRESSION
 # ==============================================================================
 
 batch_size = 10
@@ -131,7 +131,7 @@ print(f"Generation complete! {num_generated_steps} ODE steps")
 
 
 # ==============================================================================
-# VISUALIZE RESULTS
+# VISUALIZE DENOISING PROGRESSION → inference_fm.png
 # ==============================================================================
 
 num_imgs = 20
@@ -156,3 +156,44 @@ plt.tight_layout()
 plt.savefig("inference_fm.png", dpi=150, bbox_inches="tight")
 
 print("Visualization saved to inference_fm.png")
+
+
+# ==============================================================================
+# COMPARE DIFFERENT STEP COUNTS → inference_fm_steps.png
+# ==============================================================================
+
+step_counts = [1, 2, 5, 10, 50, 100, 200, 1000]
+
+# Use the same initial noise for all step counts so differences come only from step count
+x_shared = torch.randn(size=(batch_size, 1, 28, 28))
+
+print(f"\nComparing step counts: {step_counts}")
+
+results = {}
+for ns in step_counts:
+    print(f"  Running {ns} steps...")
+    ns_steps = ode_sample(model, x_shared.clone(), y, num_steps=ns)
+    results[ns] = ns_steps[-1].to("cpu")
+
+print("All runs complete!")
+
+num_rows = batch_size         # rows = digit classes 0-9
+num_cols = len(step_counts)   # columns = step counts
+
+fig, axes = plt.subplots(num_rows, num_cols, figsize=(num_cols * 1.8, num_rows * 1.5))
+
+for col, ns in enumerate(step_counts):
+    for row in range(num_rows):
+        img = (results[ns][row] + 1) / 2
+        img = img.permute(1, 2, 0)
+
+        axes[row, col].imshow(img, cmap="gray")
+        axes[row, col].axis("off")
+
+    axes[0, col].set_title(f"{ns} steps", fontsize=11)
+
+fig.suptitle("Flow Matching: Effect of Euler Step Count on Generation Quality", fontsize=13)
+fig.tight_layout(rect=[0, 0, 1, 0.96])
+fig.savefig("inference_fm_steps.png", dpi=150, bbox_inches="tight")
+
+print("Visualization saved to inference_fm_steps.png")
