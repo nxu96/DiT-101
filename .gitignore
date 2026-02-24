@@ -6,3 +6,5 @@ CLAUDE.md
 refs/
 .ipynb_checkpoints/
 model.pth
+model_fm.pth
+wandb/

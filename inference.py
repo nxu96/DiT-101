@@ -2,25 +2,20 @@
 DiT Inference Script
 
 This script performs inference (image generation) using a trained DiT model.
-It implements the reverse diffusion process (denoising) to generate images
-from pure Gaussian noise.
+It implements two reverse diffusion samplers:
 
-The reverse process works by:
-1. Starting with pure random noise
-2. Iteratively denoising from timestep T-1 down to 0
-3. At each step, the model predicts the noise component
-4. We remove part of the predicted noise to get a cleaner image
+1. DDPM (Ho et al., 2020) - The original stochastic sampler, requires all T steps.
+2. DDIM (Song et al., 2020) - A faster, deterministic sampler that can skip steps.
+   Uses the SAME trained model with no retraining needed.
 
-Reference: "Denoising Diffusion Probabilistic Models" (Ho et al., 2020)
+Both samplers start from pure Gaussian noise and iteratively denoise to produce images.
 """
 
-import torch
 import matplotlib.pyplot as plt
-
+import torch
 from config import T  # Total diffusion timesteps
 from diffusion import alphas, alphas_cumprod, variance  # Diffusion parameters
 from dit import DiT  # Diffusion Transformer model
-
 
 # ==============================================================================
 # CONFIGURATION
@@ -36,7 +31,7 @@ print(f"Using device: {DEVICE}")
 # ==============================================================================
 
 
-def backward_denoise(model, x, y):
+def backward_denoise_ddpm(model, x, y):
     """
     Perform the reverse diffusion process to generate images from noise.
 
@@ -126,6 +121,92 @@ def backward_denoise(model, x, y):
 
 
 # ==============================================================================
+# DDIM REVERSE DIFFUSION (DETERMINISTIC / ACCELERATED DENOISING)
+# ==============================================================================
+
+
+def backward_denoise_ddim(model, x, y, ddim_steps=50, eta=0.0):
+    """
+    Perform the DDIM reverse process to generate images from noise.
+
+    DDIM (Song et al., 2020) derives a non-Markovian reverse process that
+    shares the same forward marginals q(x_t | x_0) as DDPM. This allows:
+    - Skipping timesteps for much faster sampling (e.g. 50 steps vs 1000)
+    - Deterministic generation (eta=0) for reproducible outputs
+    - Tunable stochasticity via eta (eta=1 recovers DDPM)
+
+    DDIM reverse step:
+        1. Predict x_0:  x̂_0 = (x_t - √(1-α̅_t) · ε_θ) / √α̅_t
+        2. Direction:     d   = √(1 - α̅_{t-1} - σ²) · ε_θ
+        3. Noise:         σ   = η · √((1-α̅_{t-1})/(1-α̅_t)) · √(1 - α̅_t/α̅_{t-1})
+        4. Sample:  x_{t-1}  = √α̅_{t-1} · x̂_0  +  d  +  σ · z
+
+    Args:
+        model: Trained DiT model (same model used for DDPM, no retraining)
+        x: Initial noise tensor, shape (batch, channel, height, width)
+        y: Class labels for conditional generation, shape (batch,)
+        ddim_steps: Number of denoising steps (can be much less than T)
+        eta: Stochasticity parameter. 0 = deterministic, 1 = DDPM-like
+
+    Returns:
+        steps: List of tensors showing the denoising progression
+    """
+    steps = [x.clone()]
+
+    x = x.to(DEVICE)
+    y = y.to(DEVICE)
+    alphas_cumprod_device = alphas_cumprod.to(DEVICE)
+
+    # Build a subsequence of T timesteps evenly spaced, e.g. [999, 979, ..., 0]
+    # This is the key to DDIM's speed: we only visit ddim_steps out of T total
+    timestep_seq = torch.linspace(T - 1, 0, ddim_steps + 1).long()
+
+    model.eval()
+    with torch.no_grad():
+        for i in range(ddim_steps):
+            t_cur = timestep_seq[i]  # current timestep  (e.g. 999)
+            t_prev = timestep_seq[i + 1]  # previous timestep (e.g. 979)
+
+            t_batch = torch.full((x.size(0),), t_cur, device=x.device)
+
+            # Model predicts the noise component ε_θ(x_t, t)
+            pred_noise = model(x, t_batch, y)
+
+            alpha_bar_t = alphas_cumprod_device[t_cur].view(1, 1, 1, 1)
+            alpha_bar_prev = (
+                alphas_cumprod_device[t_prev].view(1, 1, 1, 1)
+                if t_prev >= 0
+                else torch.ones(1, 1, 1, 1, device=DEVICE)
+            )
+
+            # Step 1: predict x_0 from x_t and predicted noise
+            pred_x0 = (x - torch.sqrt(1 - alpha_bar_t) * pred_noise) / torch.sqrt(
+                alpha_bar_t
+            )
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+
+            # Step 2: compute DDIM variance (controlled by eta)
+            sigma = eta * torch.sqrt(
+                (1 - alpha_bar_prev)
+                / (1 - alpha_bar_t)
+                * (1 - alpha_bar_t / alpha_bar_prev)
+            )
+
+            # Step 3: direction pointing to x_t
+            direction = torch.sqrt(1 - alpha_bar_prev - sigma**2) * pred_noise
+
+            # Step 4: combine into x_{t-1}
+            x = torch.sqrt(alpha_bar_prev) * pred_x0 + direction
+            if eta > 0 and t_prev > 0:
+                x = x + sigma * torch.randn_like(x)
+
+            x = torch.clamp(x, -1.0, 1.0).detach()
+            steps.append(x.clone())
+
+    return steps
+
+
+# ==============================================================================
 # LOAD TRAINED MODEL
 # ==============================================================================
 
@@ -162,10 +243,19 @@ y = torch.arange(start=0, end=10, dtype=torch.long)
 print(f"Generating {batch_size} images...")
 print(f"Class labels: {y.tolist()}")
 
-# Run the reverse diffusion process to denoise
-steps = backward_denoise(model, x, y)
+# Choose sampler: "ddpm" (1000 steps, stochastic) or "ddim" (fast, deterministic)
+SAMPLER = "ddpm"
+DDIM_STEPS = 50  # Only used when SAMPLER="ddim"; try 20, 50, or 100
 
-print(f"Denoising complete! Generated {len(steps)} intermediate steps")
+if SAMPLER == "ddim":
+    print(f"Using DDIM sampler with {DDIM_STEPS} steps (eta=0, deterministic)")
+    steps = backward_denoise_ddim(model, x, y, ddim_steps=DDIM_STEPS, eta=0.0)
+else:
+    print(f"Using DDPM sampler with {T} steps")
+    steps = backward_denoise_ddpm(model, x, y)
+
+num_steps = len(steps) - 1
+print(f"Denoising complete! {num_steps} denoising steps")
 
 
 # ==============================================================================
@@ -181,11 +271,10 @@ plt.figure(figsize=(15, 15))
 
 for b in range(batch_size):
     for i in range(num_imgs):
-        # Calculate which step to show (evenly spaced through the process)
-        # +1 because steps[0] is pure noise, steps[T] is final image
-        idx = int(T / num_imgs) * (i + 1)
+        # Evenly spaced indices through the denoising trajectory
+        idx = int(num_steps / num_imgs) * (i + 1)
+        idx = min(idx, num_steps)
 
-        # Get the image at this step and move to CPU
         # Convert from [-1, 1] back to [0, 1] for visualization
         final_img = (steps[idx][b].to("cpu") + 1) / 2
 
@@ -199,7 +288,6 @@ for b in range(batch_size):
 
 plt.suptitle("Denoising Process: Noise → Generated Digit", fontsize=14)
 plt.tight_layout()
-plt.savefig("inference.png", dpi=150, bbox_inches="tight")
-plt.show()
+plt.savefig(f"inference_{SAMPLER}.png", dpi=150, bbox_inches="tight")
 
-print("Visualization saved to inference.png")
+print(f"Visualization saved to inference_{SAMPLER}.png")
